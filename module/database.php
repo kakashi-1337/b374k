@@ -217,6 +217,308 @@ if(!function_exists('sql_get_supported')){
 	}
 }
 
+if(!function_exists('sql_escape_string')){
+	function sql_escape_string($sqltype, $str, $con){
+		if($sqltype == 'mysql'){
+			if(class_exists('mysqli')) return $con->real_escape_string($str);
+			elseif(function_exists('mysql_real_escape_string')) return mysql_real_escape_string($str);
+		}
+		elseif($sqltype == 'pgsql') return pg_escape_string($str);
+		elseif($sqltype == 'sqlite3') return $con->escapeString($str);
+		elseif($sqltype == 'pdo') return substr($con->quote($str), 1, -1);
+		return addslashes($str);
+	}
+}
+
+if(!function_exists('sql_select_db')){
+	function sql_select_db($sqltype, $db, $con){
+		if($sqltype == 'mysql'){
+			if(class_exists('mysqli')) return $con->select_db($db);
+			elseif(function_exists('mysql_select_db')) return mysql_select_db($db);
+		}
+		elseif($sqltype == 'mssql'){
+			return sql_query($sqltype, "USE ".$db, $con);
+		}
+		elseif($sqltype == 'pgsql'){
+			return true;
+		}
+		return true;
+	}
+}
+
+if(!function_exists('sql_get_table_structure')){
+	function sql_get_table_structure($sqltype, $db, $table, $con){
+		$res = "";
+		if($sqltype == 'mysql'){
+			sql_select_db($sqltype, $db, $con);
+			$q = sql_query($sqltype, "DESCRIBE `".$table."`", $con);
+			if($q !== false){
+				$res .= "<table class='border dataView sortable tblResult'>";
+				$res .= "<tr><th>Field</th><th>Type</th><th>Null</th><th>Key</th><th>Default</th><th>Extra</th></tr>";
+				while($row = sql_fetch_data($sqltype, $q)){
+					$res .= "<tr>";
+					foreach($row as $r){
+						if(empty($r) && $r !== '0') $r = "&nbsp;";
+						$res .= "<td>".html_safe($r)."</td>";
+					}
+					$res .= "</tr>";
+				}
+				$res .= "</table>";
+				$q2 = sql_query($sqltype, "SHOW CREATE TABLE `".$table."`", $con);
+				if($q2 !== false){
+					$row2 = sql_fetch_data($sqltype, $q2);
+					if($row2) $res .= "<pre>".html_safe($row2[1])."</pre>";
+				}
+			}
+		}
+		elseif($sqltype == 'pgsql'){
+			$q = sql_query($sqltype, "SELECT column_name, data_type, is_nullable, column_default, character_maximum_length FROM information_schema.columns WHERE table_schema='".pg_escape_string($db)."' AND table_name='".pg_escape_string($table)."' ORDER BY ordinal_position", $con);
+			if($q !== false){
+				$res .= "<table class='border dataView sortable tblResult'>";
+				$res .= "<tr><th>Column</th><th>Type</th><th>Nullable</th><th>Default</th><th>Max Length</th></tr>";
+				while($row = sql_fetch_data($sqltype, $q)){
+					$res .= "<tr>";
+					foreach($row as $r){
+						if(empty($r) && $r !== '0') $r = "&nbsp;";
+						$res .= "<td>".html_safe($r)."</td>";
+					}
+					$res .= "</tr>";
+				}
+				$res .= "</table>";
+			}
+		}
+		elseif($sqltype == 'mssql'){
+			$q = sql_query($sqltype, "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, CHARACTER_MAXIMUM_LENGTH FROM ".$db.".INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='".$table."'", $con);
+			if($q !== false){
+				$res .= "<table class='border dataView sortable tblResult'>";
+				$res .= "<tr><th>Column</th><th>Type</th><th>Nullable</th><th>Default</th><th>Max Length</th></tr>";
+				while($row = sql_fetch_data($sqltype, $q)){
+					$res .= "<tr>";
+					foreach($row as $r){
+						if(empty($r) && $r !== '0') $r = "&nbsp;";
+						$res .= "<td>".html_safe($r)."</td>";
+					}
+					$res .= "</tr>";
+				}
+				$res .= "</table>";
+			}
+		}
+		elseif($sqltype == 'sqlite3' || $sqltype == 'sqlite'){
+			$q = sql_query($sqltype, "PRAGMA table_info(".$table.")", $con);
+			if($q !== false){
+				$res .= "<table class='border dataView sortable tblResult'>";
+				$res .= "<tr><th>CID</th><th>Name</th><th>Type</th><th>Not Null</th><th>Default</th><th>PK</th></tr>";
+				while($row = sql_fetch_data($sqltype, $q)){
+					$res .= "<tr>";
+					foreach($row as $r){
+						if(empty($r) && $r !== '0') $r = "&nbsp;";
+						$res .= "<td>".html_safe($r)."</td>";
+					}
+					$res .= "</tr>";
+				}
+				$res .= "</table>";
+				$q2 = sql_query($sqltype, "SELECT sql FROM sqlite_master WHERE type='table' AND name='".$table."'", $con);
+				if($q2 !== false){
+					$row2 = sql_fetch_data($sqltype, $q2);
+					if($row2) $res .= "<pre>".html_safe($row2[0])."</pre>";
+				}
+			}
+		}
+		elseif($sqltype == 'oracle'){
+			$q = sql_query($sqltype, "SELECT COLUMN_NAME, DATA_TYPE, NULLABLE, DATA_DEFAULT, DATA_LENGTH FROM ALL_TAB_COLUMNS WHERE OWNER='".strtoupper($db)."' AND TABLE_NAME='".strtoupper($table)."' ORDER BY COLUMN_ID", $con);
+			if($q !== false){
+				$res .= "<table class='border dataView sortable tblResult'>";
+				$res .= "<tr><th>Column</th><th>Type</th><th>Nullable</th><th>Default</th><th>Length</th></tr>";
+				while($row = sql_fetch_data($sqltype, $q)){
+					$res .= "<tr>";
+					foreach($row as $r){
+						if(empty($r) && $r !== '0') $r = "&nbsp;";
+						$res .= "<td>".html_safe($r)."</td>";
+					}
+					$res .= "</tr>";
+				}
+				$res .= "</table>";
+			}
+		}
+		return $res;
+	}
+}
+
+if(!function_exists('sql_dump_table')){
+	function sql_dump_table($sqltype, $db, $table, $con){
+		$dump = "";
+		$dump .= "-- Dump of table: ".$table."\n";
+		$dump .= "-- Date: ".date("Y-m-d H:i:s")."\n\n";
+
+		if($sqltype == 'mysql'){
+			sql_select_db($sqltype, $db, $con);
+			$dump .= "DROP TABLE IF EXISTS `".$table."`;
+";
+			$q = sql_query($sqltype, "SHOW CREATE TABLE `".$table."`", $con);
+			if($q !== false){
+				$row = sql_fetch_data($sqltype, $q);
+				if($row) $dump .= $row[1].";\n\n";
+			}
+			$q = sql_query($sqltype, "SELECT * FROM `".$table."`", $con);
+			if($q !== false){
+				$ncols = sql_num_fields($sqltype, $q);
+				while($row = sql_fetch_data($sqltype, $q)){
+					$vals = array();
+					foreach($row as $v){
+						if($v === null) $vals[] = "NULL";
+						else $vals[] = "'".sql_escape_string($sqltype, $v, $con)."'";
+					}
+					$dump .= "INSERT INTO `".$table."` VALUES (".implode(", ", $vals).");\n";
+				}
+			}
+		}
+		elseif($sqltype == 'pgsql'){
+			$dump .= "DROP TABLE IF EXISTS \"".$db."\".\"".$table."\";\n";
+			$q = sql_query($sqltype, "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_schema='".pg_escape_string($db)."' AND table_name='".pg_escape_string($table)."' ORDER BY ordinal_position", $con);
+			if($q !== false){
+				$cols = array();
+				while($row = pg_fetch_assoc($q)){
+					$coldef = '"'.$row['column_name'].'" '.$row['data_type'];
+					if($row['is_nullable'] == 'NO') $coldef .= ' NOT NULL';
+					if(!empty($row['column_default'])) $coldef .= ' DEFAULT '.$row['column_default'];
+					$cols[] = $coldef;
+				}
+				$dump .= "CREATE TABLE \"".$db."\".\"".$table."\" (\n  ".implode(",\n  ", $cols)."\n);\n\n";
+			}
+			$q = sql_query($sqltype, "SELECT * FROM \"".$db."\".\"".$table."\"", $con);
+			if($q !== false){
+				while($row = pg_fetch_row($q)){
+					$vals = array();
+					foreach($row as $v){
+						if($v === null) $vals[] = "NULL";
+						else $vals[] = "'".pg_escape_string($v)."'";
+					}
+					$dump .= "INSERT INTO \"".$db."\".\"".$table."\" VALUES (".implode(", ", $vals).");\n";
+				}
+			}
+		}
+		elseif($sqltype == 'sqlite3'){
+			$q = sql_query($sqltype, "SELECT sql FROM sqlite_master WHERE type='table' AND name='".$con->escapeString($table)."'", $con);
+			if($q !== false){
+				$row = $q->fetchArray(1);
+				if($row){
+					$dump .= "DROP TABLE IF EXISTS \"".$table."\";\n";
+					$dump .= $row[0].";\n\n";
+				}
+			}
+			$q = sql_query($sqltype, "SELECT * FROM \"".$table."\"", $con);
+			if($q !== false){
+				while($row = $q->fetchArray(1)){
+					$vals = array();
+					foreach($row as $v){
+						if($v === null) $vals[] = "NULL";
+						else $vals[] = "'".$con->escapeString($v)."'";
+					}
+					$dump .= "INSERT INTO \"".$table."\" VALUES (".implode(", ", $vals).");\n";
+				}
+			}
+		}
+		elseif($sqltype == 'sqlite'){
+			$q = sql_query($sqltype, "SELECT sql FROM sqlite_master WHERE type='table' AND name='".$table."'", $con);
+			if($q !== false){
+				$row = sqlite_fetch_array($q, 1);
+				if($row){
+					$dump .= "DROP TABLE IF EXISTS \"".$table."\";\n";
+					$dump .= $row[0].";\n\n";
+				}
+			}
+			$q = sql_query($sqltype, "SELECT * FROM \"".$table."\"", $con);
+			if($q !== false){
+				while($row = sqlite_fetch_array($q, 1)){
+					$vals = array();
+					foreach($row as $v){
+						if($v === null) $vals[] = "NULL";
+						else $vals[] = "'".sqlite_escape_string($v)."'";
+					}
+					$dump .= "INSERT INTO \"".$table."\" VALUES (".implode(", ", $vals).");\n";
+				}
+			}
+		}
+		elseif($sqltype == 'mssql'){
+			$dump .= "-- MSSQL dump (structure + data)\n";
+			$dump .= "IF OBJECT_ID('".$db."..".$table."', 'U') IS NOT NULL DROP TABLE ".$db."..".$table.";\nGO\n";
+			$q = sql_query($sqltype, "SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, IS_NULLABLE FROM ".$db.".INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='".$table."' ORDER BY ORDINAL_POSITION", $con);
+			if($q !== false){
+				$cols = array();
+				while($row = sql_fetch_data($sqltype, $q)){
+					$coldef = "[".$row[0]."] ".$row[1];
+					if(!empty($row[2]) && $row[2] != '-1') $coldef .= "(".$row[2].")";
+					elseif($row[2] == '-1') $coldef .= "(MAX)";
+					if($row[3] == 'NO') $coldef .= " NOT NULL";
+					$cols[] = $coldef;
+				}
+				$dump .= "CREATE TABLE ".$db."..".$table." (\n  ".implode(",\n  ", $cols)."\n);\nGO\n\n";
+			}
+			$q = sql_query($sqltype, "SELECT * FROM ".$db."..".$table, $con);
+			if($q !== false){
+				while($row = sql_fetch_data($sqltype, $q)){
+					$vals = array();
+					foreach($row as $v){
+						if($v === null) $vals[] = "NULL";
+						else $vals[] = "'".str_replace("'","''",$v)."'";
+					}
+					$dump .= "INSERT INTO ".$db."..".$table." VALUES (".implode(", ", $vals).");\n";
+				}
+				$dump .= "GO\n";
+			}
+		}
+		elseif($sqltype == 'oracle'){
+			$dump .= "-- Oracle dump (data only)\n";
+			$q = sql_query($sqltype, "SELECT * FROM ".$db.".".$table, $con);
+			if($q !== false){
+				$ncols = oci_num_fields($q);
+				while($row = oci_fetch_row($q)){
+					$vals = array();
+					foreach($row as $v){
+						if($v === null) $vals[] = "NULL";
+						else $vals[] = "'".str_replace("'","''",$v)."'";
+					}
+					$dump .= "INSERT INTO ".$db.".".$table." VALUES (".implode(", ", $vals).");\n";
+				}
+			}
+		}
+		$dump .= "\n";
+		return $dump;
+	}
+}
+
+if(!function_exists('sql_dump_database')){
+	function sql_dump_database($sqltype, $db, $con){
+		$dump = "-- Database dump: ".$db."\n";
+		$dump .= "-- Generated: ".date("Y-m-d H:i:s")."\n";
+		$dump .= "-- Engine: ".$sqltype."\n";
+		$dump .= "-- ----------------------------------------\n\n";
+
+		$tables = array();
+		if($sqltype == 'mysql'){
+			sql_select_db($sqltype, $db, $con);
+			$q = sql_query($sqltype, "SHOW TABLES FROM `".$db."`", $con);
+		}
+		elseif($sqltype == 'mssql') $q = sql_query($sqltype, "SELECT name FROM ".$db."..sysobjects WHERE xtype = 'U'", $con);
+		elseif($sqltype == 'pgsql') $q = sql_query($sqltype, "SELECT table_name FROM information_schema.tables WHERE table_schema='".pg_escape_string($db)."'", $con);
+		elseif($sqltype == 'oracle') $q = sql_query($sqltype, "SELECT TABLE_NAME FROM SYS.ALL_TABLES WHERE OWNER='".strtoupper($db)."'", $con);
+		elseif($sqltype == 'sqlite3' || $sqltype == 'sqlite') $q = sql_query($sqltype, "SELECT name FROM sqlite_master WHERE type='table'", $con);
+		else return $dump."-- Dump not supported for this driver\n";
+
+		if($q !== false){
+			while($row = sql_fetch_data($sqltype, $q)){
+				if(isset($row[0])) $tables[] = $row[0];
+			}
+		}
+
+		foreach($tables as $tbl){
+			$dump .= sql_dump_table($sqltype, $db, $tbl, $con);
+		}
+
+		return $dump;
+	}
+}
+
 if(isset($p['dbGetSupported'])){
 	$res = sql_get_supported();
 	if(empty($res)) $res = "error";
@@ -233,7 +535,28 @@ elseif(isset($p['dbType'])&&isset($p['dbHost'])&&isset($p['dbUser'])&&isset($p['
 	$res = "";
 
 	if($con!==false){
-		if(isset($p['dbQuery'])){
+
+		if(isset($p['dbDump'])){
+			$db = trim($p['dbDump']);
+			$table = isset($p['dbDumpTable']) ? trim($p['dbDumpTable']) : '';
+			if(!empty($table)){
+				$dump = sql_dump_table($type, $db, $table, $con);
+			} else {
+				$dump = sql_dump_database($type, $db, $con);
+			}
+			output($dump);
+		}
+		elseif(isset($p['dbStructure'])){
+			$db = trim($p['dbStructure']);
+			$table = trim($p['dbStructureTable']);
+			$res = sql_get_table_structure($type, $db, $table, $con);
+			if(!empty($res)){
+				$res = "<p class='boxtitle' style='padding:8px;margin-bottom:8px;'>Structure: <span class='strong'>".$db."</span>.<span class='strong'>".$table."</span></p>".$res;
+				output($res);
+			}
+			output('error');
+		}
+		elseif(isset($p['dbQuery'])){
 			$query = $p['dbQuery'];
 			$pagination = "";
 			if((isset($p['dbDB']))&&(isset($p['dbTable']))){
@@ -321,12 +644,12 @@ elseif(isset($p['dbType'])&&isset($p['dbHost'])&&isset($p['dbUser'])&&isset($p['
 							elseif(($type=='sqlite3') || ($type=='sqlite')) $showtbl = "SELECT name FROM sqlite_master WHERE type='table'";
 							else $showtbl = "";
 
-							$res .= "<p class='boxtitle boxNav' style='padding:8px 32px;margin-bottom:4px;'>".$db."</p><table class='border' style='display:none;margin:8px 0;'>";
+							$res .= "<p class='boxtitle boxNav' style='padding:8px 32px;margin-bottom:4px;'>".$db." <span class='button' style='float:right;min-width:60px;width:60px;padding:4px;font-size:11px;' onclick=\"db_dump_db('".$db."');\">dump</span></p><table class='border' style='display:none;margin:8px 0;'>";
 							$query_table = sql_query($type, $showtbl, $con);
 
 							if($query_table!=false){
 								while($tables_arr = sql_fetch_data($type, $query_table)){
-									foreach($tables_arr as $table) $res .= "<tr><td class='dbTable borderbottom' style='cursor:pointer;'>".$table."</td></tr>";
+									foreach($tables_arr as $table) $res .= "<tr><td class='dbTable borderbottom' style='cursor:pointer;'>".$table."</td><td class='borderbottom' style='width:50px;text-align:center;'><span class='dbStructBtn' style='cursor:pointer;color:#d4af37;' data-db='".$db."' data-table='".$table."' title='Structure'>S</span> <span class='dbDumpBtn' style='cursor:pointer;color:#cc0000;' data-db='".$db."' data-table='".$table."' title='Dump'>D</span></td></tr>";
 								}
 							}
 							$res .= "</table>";
