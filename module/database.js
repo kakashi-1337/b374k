@@ -85,8 +85,25 @@ function db_nav_bind(){
 	$('.dbTable').on('click', function(){
 		type = $('#dbType').val();
 		table = $(this).html();
-		db = $(this).parent().parent().parent().prev().html();
+		var navEl = $(this).parent().parent().parent().prev();
+		db = navEl.clone().children().remove().end().text().trim();
 		db_query_tbl(type, db, table, 0, dbPageLimit);
+	});
+
+	$('.dbStructBtn').off('click');
+	$('.dbStructBtn').on('click', function(e){
+		e.stopPropagation();
+		var db = $(this).attr('data-db');
+		var table = $(this).attr('data-table');
+		db_structure(db, table);
+	});
+
+	$('.dbDumpBtn').off('click');
+	$('.dbDumpBtn').on('click', function(e){
+		e.stopPropagation();
+		var db = $(this).attr('data-db');
+		var table = $(this).attr('data-table');
+		db_dump_table(db, table);
 	});
 }
 
@@ -176,4 +193,59 @@ function db_pagination(type){
 		if(start<0) start = 0;
 	}
 	db_query_tbl(dbType, db, table, start, limit);
+}
+
+function db_structure(db, table){
+	var dbType = $('#dbType').val();
+	var dbHost = $('#dbHost').val();
+	var dbUser = $('#dbUser').val();
+	var dbPass = $('#dbPass').val();
+	var dbPort = $('#dbPort').val();
+
+	send_post({dbType:dbType, dbHost:dbHost, dbUser:dbUser, dbPass:dbPass, dbPort:dbPort, dbStructure:db, dbStructureTable:table}, function(res){
+		if(res!='error'){
+			$('#dbResult').html(res);
+			$('.tblResult').each(function(){
+				sorttable.k(this);
+			});
+		}
+	});
+}
+
+function db_dump_table(db, table){
+	var dbType = $('#dbType').val();
+	var dbHost = $('#dbHost').val();
+	var dbUser = $('#dbUser').val();
+	var dbPass = $('#dbPass').val();
+	var dbPort = $('#dbPort').val();
+
+	send_post({dbType:dbType, dbHost:dbHost, dbUser:dbUser, dbPass:dbPass, dbPort:dbPort, dbDump:db, dbDumpTable:table}, function(res){
+		if(res!='error'){
+			db_download(res, db + "_" + table + ".sql");
+		}
+	});
+}
+
+function db_dump_db(db){
+	var dbType = $('#dbType').val();
+	var dbHost = $('#dbHost').val();
+	var dbUser = $('#dbUser').val();
+	var dbPass = $('#dbPass').val();
+	var dbPort = $('#dbPort').val();
+
+	send_post({dbType:dbType, dbHost:dbHost, dbUser:dbUser, dbPass:dbPass, dbPort:dbPort, dbDump:db}, function(res){
+		if(res!='error'){
+			db_download(res, db + "_dump.sql");
+		}
+	});
+}
+
+function db_download(content, filename){
+	var el = document.createElement('a');
+	el.setAttribute('href', 'data:application/sql;charset=utf-8,' + encodeURIComponent(content));
+	el.setAttribute('download', filename);
+	el.style.display = 'none';
+	document.body.appendChild(el);
+	el.click();
+	document.body.removeChild(el);
 }
