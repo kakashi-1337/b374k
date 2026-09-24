@@ -239,7 +239,11 @@ Endpoints using user-controlled path/query parameters for resource access:
 ```
 Missing the leading `/`. This may cause relative URL resolution issues depending on the current page path. This could be a bug worth investigating -- it might fail or resolve to an unexpected endpoint.
 
-### 10.5 Socket.IO Connection
+### 10.5 Exposed Banking Fields in User Object
+
+The user object returned by `/api/v0/user` and bridge user listing endpoints contains `netbankAccountNumber` -- the user's linked bank account number. Combined with user enumeration (via bridge endpoints or NoSQLi), this exposes real banking credentials at scale.
+
+### 10.6 Socket.IO Connection
 
 ```js
 // pages/Portal/Dashboard/Receive/index.js:92

