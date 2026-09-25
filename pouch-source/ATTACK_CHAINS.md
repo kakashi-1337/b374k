@@ -814,3 +814,223 @@ Server-side defenses are solid against PP/SSPP/mass assignment:
 - HTTP method override not enabled
 - `constructor.prototype` in JSON body causes intermittent 500 (minor instability)
 - **Null byte in query param keys = confirmed unauthenticated DoS (indefinite hang)**
+
+---
+
+## APPENDIX C: HTTP Request Smuggling Testing -- ALL BLOCKED BY CLOUDFLARE
+
+Tested all known HTTP request smuggling techniques against app.pouch.ph, including
+PortSwigger HTTP Terminator research payloads. Cloudflare terminates and re-serializes
+all HTTP traffic, making desync-based smuggling impossible.
+
+### CL.TE (Content-Length / Transfer-Encoding Desync)
+
+| Payload | Result |
+|---------|--------|
+| Standard CL.TE (CL=short, TE chunked with smuggled prefix) | 400 Bad Request |
+| CL.TE with smuggled `GET /admin` | 400 Bad Request |
+| CL.TE with 0-length chunk + smuggled request | 400 Bad Request |
+
+### TE.CL (Transfer-Encoding / Content-Length Desync)
+
+| Payload | Result |
+|---------|--------|
+| Standard TE.CL (chunked body, short CL) | 400 Bad Request |
+| TE.CL with smuggled POST | 400 Bad Request |
+
+### TE.TE Obfuscation (15 PortSwigger Variants)
+
+All variants attempt to make one hop parse Transfer-Encoding while the other ignores it.
+
+| Variant | Header Value | Result |
+|---------|-------------|--------|
+| Extra space | `Transfer-Encoding : chunked` | 400 |
+| Tab before value | `Transfer-Encoding:\tchunked` | 400 |
+| Vertical tab (0x0B) | `Transfer-Encoding:\x0bchunked` | 400 |
+| Form feed (0x0C) | `Transfer-Encoding:\x0cchunked` | 400 |
+| Trailing junk | `Transfer-Encoding: chunked-thing` | 400 |
+| Double TE | Two `Transfer-Encoding` headers | 400 |
+| Mixed case | `Transfer-Encoding: Chunked` | 400 |
+| UPPER case | `TRANSFER-ENCODING: chunked` | 400 |
+| obs-fold (line folding) | `Transfer-Encoding:\r\n chunked` | 400 |
+| Comma separation | `Transfer-Encoding: identity, chunked` | 400 |
+| Semicolon parameter | `Transfer-Encoding: chunked;q=0.0` | 400 |
+| Leading newline | `X-Foo: bar\r\nTransfer-Encoding: chunked` | 400 |
+| Null in header | `Transfer-Encoding: \x00chunked` | 400 |
+| Tab inside name | `Transfer-Encodin\tg: chunked` | 400 |
+| Multi-line value | `Transfer-Encoding: chunked\r\n identity` | 400 |
+
+Cloudflare normalizes all Transfer-Encoding header variants before forwarding. No
+obfuscation bypasses the proxy's TE detection.
+
+### Chunk Extension Abuse
+
+| Payload | Result |
+|---------|--------|
+| `1;ext=val\r\nG\r\n0\r\n\r\n` | 404 (reached backend, no desync) |
+| Chunk extension with long random data | 404 (reached backend, no desync) |
+| Chunk extension with injected headers | 404 (reached backend, no desync) |
+
+Chunk extensions pass through Cloudflare but the backend processes them normally.
+No request boundary confusion observed.
+
+### Request Line Smuggling
+
+| Variant | Result |
+|---------|--------|
+| Absolute URL (`GET http://app.pouch.ph/...`) | 200 (no desync) |
+| Double space before HTTP version | 200 (no desync) |
+| `@` in URL path | 200 (no desync) |
+| Tab as SP separator | 400 |
+| Fragment in request line | 200 (no desync) |
+
+### HTTP Version Tricks
+
+| Version | Result |
+|---------|--------|
+| HTTP/1.0 | 426 Upgrade Required |
+| HTTP/0.9 | 426 Upgrade Required |
+| HTTP/2.0 over h1 TLS | 426 Upgrade Required |
+
+### Content-Length Tricks
+
+| Variant | Result |
+|---------|--------|
+| Duplicate CL headers (different values) | 400 |
+| CL with leading zero (`Content-Length: 06`) | 404 (reached backend, no desync) |
+| Negative CL (`Content-Length: -1`) | 400 |
+| CL + TE together (standard) | 400 |
+
+### CRLF Header Injection
+
+| Payload | Result |
+|---------|--------|
+| CRLF in header value to inject arbitrary header | 200 (header injected, but no smuggling) |
+| CRLF to inject `Transfer-Encoding: chunked` | 400 (Cloudflare still catches TE) |
+| CRLF to inject `Content-Length: 0` | 400 |
+| CRLF with double CRLF (body injection) | 200 (no desync observed) |
+
+CRLF characters pass through in header values, but Cloudflare catches any injected
+CL or TE headers even when delivered via CRLF injection.
+
+### HTTP Pipelining
+
+| Test | Result |
+|------|--------|
+| Two back-to-back requests on single connection | Both responses returned correctly |
+| Pipeline with mismatched CL | 400 |
+
+Pipelining works (server returns both responses), but no desync or response queue
+poisoning observed. Cloudflare serializes pipelined requests correctly.
+
+### H2C Upgrade (HTTP/2 Cleartext)
+
+| Payload | Result |
+|---------|--------|
+| `Connection: Upgrade, HTTP2-Settings` + `Upgrade: h2c` | 200 (no actual protocol upgrade) |
+
+Server returns 200 but does not actually upgrade to HTTP/2. The upgrade header is
+silently ignored. No tunnel or smuggling path available.
+
+### Conclusion
+Cloudflare acts as a full HTTP terminating proxy. It parses, normalizes, and re-serializes
+every request before forwarding to the Render.com backend. All desync vectors are dead:
+- TE/CL conflicts: detected and rejected (400)
+- TE obfuscation: all 15+ variants normalized before forwarding
+- CRLF injection: passes through but injected TE/CL still caught
+- Pipelining: serialized correctly
+- H2C upgrade: ignored
+- Version downgrade: rejected (426)
+
+**HTTP request smuggling is not viable against this target.**
+
+---
+
+## APPENDIX D: Additional Security Findings
+
+### D1: Cookie Security Issues (Low-Medium)
+
+The `connect.sid` session cookie has configuration weaknesses:
+
+| Attribute | Value | Issue |
+|-----------|-------|-------|
+| HttpOnly | YES | Good - prevents XSS cookie theft |
+| Secure | **MISSING** | Cookie sent over HTTP (MITM stealable) |
+| SameSite | **MISSING** | Defaults to Lax in modern browsers, but older browsers send cross-site |
+| Expires | Sat, 25 Sep 2027 | 2-year expiry (excessive session lifetime) |
+| Path | / | Standard |
+| Domain | .pouch.ph | Scoped to domain |
+
+**Impact:** On a network where an attacker can intercept HTTP traffic (public WiFi, MITM),
+the session cookie is transmitted in cleartext. The missing SameSite attribute theoretically
+allows CSRF in older browsers.
+
+**Practical limitation:** All bridge/admin endpoints enforce server-side auth checks (403),
+so even a stolen regular-user cookie only grants access to that user's own data. The CSRF
+angle is limited because state-changing endpoints likely require CSRF tokens or are JSON-only.
+
+**CVSS:** 4.8 Medium (AV:A/AC:H/PR:N/UI:R/S:U/C:H/I:N/A:N)
+
+### D2: Auth Type Confusion DoS (Low-Medium)
+
+The login endpoint (`POST /api/v0/auth`) does not validate input types before passing to
+bcrypt. Sending non-string types causes different failure modes:
+
+| Input | Result | Cause |
+|-------|--------|-------|
+| `{"username":"test","password":123}` (integer) | **Server hang (30s+)** | bcrypt.compare crashes on non-string |
+| `{"username":"test","password":true}` (boolean) | **Server hang (30s+)** | bcrypt.compare crashes on non-string |
+| `{"username":["test"],"password":"test"}` (array) | 500 error | Error: "The 'data' argument must be of type string" |
+| `{"username":{"$gt":""},"password":"test"}` (object/NoSQLi) | 500 error | Same type error (crashes before query) |
+| `{"username":"test","password":["test"]}` (array) | 200, login fails | bcrypt handles array gracefully |
+
+**Impact:** Non-string password causes indefinite server hang (one connection per request).
+Similar to the null byte DoS but requires POST body. The 500 errors also disclose internal
+error messages (minor info disclosure).
+
+**Note:** The username-as-object (NoSQLi on login) does NOT work because the server crashes
+at bcrypt.compare before the MongoDB query executes. The type error acts as an accidental
+defense against auth bypass via NoSQLi on the login endpoint.
+
+**CVSS:** 5.3 Medium (AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L)
+
+### D3: CORS Configuration (Clean)
+
+| Test | Result |
+|------|--------|
+| `Origin: https://evil.com` | No `Access-Control-Allow-Origin` header |
+| `Origin: https://app.pouch.ph` | No ACAO header |
+| `Origin: null` | No ACAO header |
+| Preflight OPTIONS | No ACAO header |
+
+The API does not return CORS headers at all. This means:
+- Cross-origin JavaScript cannot read API responses (browser enforces same-origin policy)
+- No CORS misconfiguration to exploit
+- API is effectively same-origin only from a browser perspective
+
+### D4: Null Byte Deep Dive -- DoS Only, No Data Exfil (Confirmed)
+
+Extended testing of the null byte hang vector beyond simple DoS:
+
+| Test | Result |
+|------|--------|
+| Key truncation (`admin%00junk` as username) | No truncation, user:null |
+| Value truncation (`username=admin%00extra`) | 200, user:null (no match) |
+| Null byte in URL path (`/api/v0/user%00/admin`) | 404 |
+| Different endpoints with null in key | All hang identically |
+| Null byte in POST body (urlencoded) | 200 OK (no hang) |
+| Null byte in POST body (JSON) | 200 OK (no hang) |
+| Timing oracle (null vs non-null) | No distinguishable timing difference |
+
+**Conclusion:** The null byte vulnerability is strictly a connection-exhaustion DoS vector.
+It cannot be leveraged for:
+- Data extraction (no truncation or oracle behavior)
+- WAF bypass (mangled keys don't match anything useful)
+- Authentication bypass (non-matching keys just return user:null)
+
+The hang only occurs in the Express qs query string parser (GET params). POST body parsers
+(both urlencoded and JSON) handle null bytes without hanging.
+
+Two distinct null byte hang vectors confirmed:
+1. Null byte in query parameter KEY name (qs parser) -- any endpoint
+2. Null byte in `$regex` VALUE on password field (MongoDB regex engine) -- `/api/v0/user` only
