@@ -559,17 +559,24 @@ GET /api/v0/user?username=bitwatch&liveSecret[$regex]=^. -> MATCH (secret exists
 | username | YES | YES | Account enumeration |
 | password | YES | YES | Bcrypt hash -> offline crack |
 | email | YES | YES | PII exposure |
-| phone | YES | YES | PII exposure, SIM swap target |
+| phone | YES | YES | PII, SIM swap target |
+| name | YES | YES | Real name (PII) |
 | role | YES | N/A (filter) | Admin enumeration |
 | balances.PHP | YES | Via $gt/$lt binary search | Financial data |
 | balances.BTC | YES | Via $gt/$lt binary search | Financial data |
 | liveKey | YES | YES | API credential theft |
 | liveSecret | YES | YES | API credential theft |
+| netbankAccountNumber | YES | YES | Linked bank account number |
+| pin | YES | YES | Bcrypt PIN hash (4-6 digits = trivial crack) |
 | banned | YES | N/A (filter) | Status enumeration |
-| pin | NO | NO | Protected |
 | deviceToken | NO | NO | Protected |
 | identityDocument.* | NO | NO | Protected |
 | personalInformation.* | NO | NO | Protected |
+
+**PIN Hash Note:** The API response shows `pin: true` (boolean), but MongoDB stores the actual
+bcrypt hash. A 4-6 digit PIN has at most 1,000,000 values. At bcrypt cost 10, hashcat cracks
+the full keyspace in under 30 seconds on a modern GPU. Combined with password hash extraction,
+this gives an attacker both login credentials AND transaction PIN for any user.
 
 ### Impact
 - Phone number exposure enables SIM swap attacks for account takeover
